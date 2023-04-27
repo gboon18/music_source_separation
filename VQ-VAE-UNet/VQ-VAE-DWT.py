@@ -8,23 +8,71 @@ import matplotlib.pyplot as plt
 import IPython.display as ipd
 # get_ipython().system('pip install torchaudio')
 import torchaudio
+import signal
+import sys
+
+import argparse
+
+import random
+
+seed = 42
+random.seed(seed)
+np.random.seed(seed)
+torch.manual_seed(seed)
+torch.cuda.manual_seed(seed)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 from dataset_cpuDataLoader_ptwt import readAudio
 
 from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
+from torch.optim.lr_scheduler import StepLR
 
 import wandb
 import subprocess
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--enable_dwt", action='store_true', help='Wanna do DWT?')
+parser.add_argument("--enable_wandb", action='store_true', help='WandB use?')
+parser.add_argument("--nlevel", default=6, type=int, help='number of dwt level')
+parser.add_argument("--train_unet_only", action='store_true', help='Wanna train UNet only?')
+parser.add_argument("--alpha", default=1./500., type=float, help='alpha for audio intensity matching')
+parser.add_argument("--num_epoch", default=100, type=int, help='number of epochs?')
+parser.add_argument("--lr", default=1e-4, type=float, help='learning rate?')
+parser.add_argument("--len", default=3, type=int, help='length of the song')
+parser.add_argument("--valen", default=3, type=int, help='length of the song for validation')
+args = parser.parse_args()
+
 # wandb.login(key='7a7346b9e3ee9dfebc6fc65da44ef3644f03298a')
 api_key='7a7346b9e3ee9dfebc6fc65da44ef3644f03298a'
 subprocess.call(f'wandb login {api_key}', shell=True)
-wandb.init(project='VQ-VAE-DWT', mode='online')
+if args.enable_wandb:
+    wandb.init(project='VQ-VAE-DWT7', mode='online')
+else:
+    wandb.init(project='VQ-VAE-DWT7', mode='offline')
 
+#####HYPER PARAMETERS#####
+LEARNING_RATE = args.lr
+NUM_EPOCH = args.num_epoch
+##########################
+DWT = args.enable_dwt
+NLEVEL = args.nlevel
+TRAIN_UNET_ONLY = args.train_unet_only
+alpha = args.alpha
+SONGLEN = int(args.len)
+print('train_unet_only:', TRAIN_UNET_ONLY)
+print('dwt nlevel:', NLEVEL)
+print('alpha:', alpha)
+print('num_epoch:', NUM_EPOCH)
+print('lr:', LEARNING_RATE)
+print('song length:', SONGLEN, 'sec')
+print('song validation length:', args.valen, 'sec')
 
-readaudio = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Dev', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Dev', False, True, 'cpu')
-audios = readaudio.__getitem__(1, 44100*10)
-readvalid = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Test', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Test', False, True, 'cpu')
-valids = readvalid.__getitem__(1, 44100*10)
+readaudio = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Dev', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Dev', False, True, 'cpu', DWT, NLEVEL)
+audios = readaudio.__getitem__(1, 44100*SONGLEN)
+# readvalid = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Test', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Test', False, True, 'cpu', DWT, NLEVEL)
+readvalid = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Dev', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Dev', False, True, 'cpu', DWT, NLEVEL)
+valids = readvalid.__getitem__(1, 44100*args.valen)
 
 class UNetBlock(nn.Module):
     # def __init__(self, in_channels, out_channels, downsample=True, dropout_prob=0.5):
@@ -177,10 +225,10 @@ class VectorQuantizer(nn.Module):
         return quantized, loss, perplexity, encoding_indices
     
 class VQVAEWithUNet(nn.Module):
-    def __init__(self, in_channels, out_channels, hidden_channels=[64, 128, 256, 512], num_embeddings=64, embedding_dim=512, dropout_prob=0.5, train_unet_only=False):
+    def __init__(self, in_channels, out_channels, hidden_channels=[64, 128, 256, 512], num_embeddings=64, embedding_dim=512, dropout_prob=0.5, train_unet_only=False, num_levels=6):
         super().__init__()
 
-        self.num_levels = 6+1
+        self.num_levels = num_levels+1
         self.unets = nn.ModuleList([UNet(in_channels, out_channels, hidden_channels, dropout_prob=dropout_prob) for _ in range(self.num_levels)])
         self.vq_layers = nn.ModuleList([VectorQuantizer(num_embeddings, embedding_dim, commitment_cost=0.25) for _ in range(self.num_levels)])
         self.train_unet_only = train_unet_only
@@ -200,31 +248,44 @@ class VQVAEWithUNet(nn.Module):
         for i in range(self.num_levels):
             x, skips = self.unets[i](inputs[i], encoder=True)
             
+##########################
             if self.train_unet_only:
                 x = self.unets[i](x, skips, encoder=False)
                 output_list.append(x)
+                
             else:
+                # print('VQVAEWithUNet Forward level:', i)
                 quantized, loss, perplexity, encoding_indices = self.vq_layers[i](x)
                 x = self.unets[i](quantized.permute(0, 2, 1).contiguous(), skips, encoder=False)
                 output_list.append(x)
                 loss_list.append(loss)
                 perplexity_list.append(perplexity)
                 encoding_indices_list.append(encoding_indices)
+##########################
+#             x, skips = self.unets[i](inputs[i], encoder=True)
+#             quantized, loss, perplexity, encoding_indices = self.vq_layers[i](x)
+#             x = self.unets[i](quantized.permute(0, 2, 1).contiguous(), skips, encoder=False)
             
-            if self.train_unet_only:
-                return output_list
-            else:
-                total_loss = sum(loss_list)
-                total_perplexity = sum(perplexity_list)
-                # encoding_indices = torch.stack(encoding_indices_list, dim=1)
+#             output_list.append(x)
+#             loss_list.append(loss)
+#             perplexity_list.append(perplexity)
+#             encoding_indices_list.append(encoding_indices)
+##########################
 
-                # return output_list, total_loss, total_perplexity, encoding_indices
-                # return output_list, total_loss, total_perplexity, encoding_indices_list    
-                return output_list, loss_list, perplexity_list, encoding_indices_list    
+        if self.train_unet_only:
+            return output_list
+        else:
+            total_loss = sum(loss_list)
+            total_perplexity = sum(perplexity_list)
+            # encoding_indices = torch.stack(encoding_indices_list, dim=1)
+
+            # return output_list, total_loss, total_perplexity, encoding_indices
+            # return output_list, total_loss, total_perplexity, encoding_indices_list    
+            return output_list, loss_list, perplexity_list, encoding_indices_list    
 
 
-dataloader = DataLoader(audios, batch_size=2, shuffle=True)
-valiloader = DataLoader(valids, batch_size=2, shuffle=False)
+dataloader = DataLoader(audios, batch_size=2, shuffle=True, persistent_workers=True, num_workers=8, pin_memory=True)
+valiloader = DataLoader(valids, batch_size=2, shuffle=False, persistent_workers=True, num_workers=8, pin_memory=True)
 
 def spectrogram_mse_loss(mixes, source, target, window_size=1024, hop_length=512):
     assert source.shape == target.shape, "Source and target tensors should have the same shape"
@@ -270,14 +331,29 @@ def multi_resolution_stft_loss_with_amplitude_constraint(sources, mixes, target,
         # for src in range(sources.size(1)):
         total_loss += spectrogram_mse_loss(sources, mixes, target, window_size=ws, hop_length=hl)
     
-    total_loss += amplitude_matching_loss(sources, mixes, alpha)
+    # print('multi_resolution_stft_loss_with_amplitude_constraint loss and amplitude_matching_loss:', total_loss.item(), amplitude_matching_loss(sources, mixes, alpha).item())
+    # total_loss += amplitude_matching_loss(sources, mixes, alpha)
     
     total_loss /= len(list(zip(window_sizes, hop_lengths)))
     
     return total_loss
 
 
-def si_snr_loss(source, target, eps=1e-8):
+# def si_snr_loss(source, target, eps=1e-8):
+#     target = target - target.mean(dim=-1, keepdim=True)
+#     source = source - source.mean(dim=-1, keepdim=True)
+    
+#     s_target = torch.sum(target * source, dim=-1, keepdim=True) * target / (torch.sum(target**2, dim=-1, keepdim=True) + eps)
+#     e_noise = source - s_target
+    
+#     si_snr = 10 * torch.log10(torch.sum(s_target**2, dim=-1) / (torch.sum(e_noise**2, dim=-1) + eps) + eps)
+    
+#     # Average the loss across the channels
+#     loss = -si_snr.mean(dim=1).mean()
+
+#     return loss
+
+def si_snr_loss_with_amplitude_constraint(source, target, mix, alpha=0.03, eps=1e-8):
     target = target - target.mean(dim=-1, keepdim=True)
     source = source - source.mean(dim=-1, keepdim=True)
     
@@ -289,7 +365,14 @@ def si_snr_loss(source, target, eps=1e-8):
     # Average the loss across the channels
     loss = -si_snr.mean(dim=1).mean()
 
+    # Add the amplitude constraint term
+    # amplitude_difference = torch.abs(source.sum(dim=-1) - mix.sum(dim=-1))
+    # amplitude_constraint = alpha * amplitude_difference.mean()
+    # print('si_snr_loss_with_amplitude_constraint loss and amplitude_matching_loss:', loss.item(), amplitude_matching_loss(source, mix, alpha).item())
+    # loss += amplitude_matching_loss(source, mix, alpha)
+
     return loss
+
 
 iteration = 0 # Define a global variable to count the number of iterations
 # Define a hook function to print gradients every dataloader iteration
@@ -313,20 +396,20 @@ def print_grad(module, grad_input, grad_output):
     
 local_rank = 0
 device = torch.device('cuda:%d'%local_rank)
-model_vqvaeunet = VQVAEWithUNet(in_channels=1, out_channels=4, dropout_prob=0.2).to(device)
-optimizer = torch.optim.Adam(model_vqvaeunet.parameters(), lr=1e-3)
+model_vqvaeunet = VQVAEWithUNet(in_channels=1, out_channels=4, dropout_prob=0.2, num_levels=NLEVEL).to(device)
+optimizer = torch.optim.Adam(model_vqvaeunet.parameters(), lr=LEARNING_RATE)
 
 # attach hook to the first convolutional layer of UNet encoder
 # handle = model_vqvaeunet.unet.down_blocks[0].register_full_backward_hook(print_grad)
-
-for epoch in range(1000):
+# scheduler = StepLR(optimizer, step_size=40, gamma=0.1) # every 1 epoch, lower the lr by 10% 
+for epoch in range(NUM_EPOCH):
     if epoch % 100 == 0:
         print('epoch', epoch)
-    train_unet_only = False
-    model_vqvaeunet.set_train_unet_only(train_unet_only)
-    if epoch < 1000:
-        train_unet_only = True
-        model_vqvaeunet.set_train_unet_only(train_unet_only)
+
+    model_vqvaeunet.set_train_unet_only(TRAIN_UNET_ONLY)
+    # if epoch < 10000:
+    #     TRAIN_UNET_ONLY = True
+    #     model_vqvaeunet.set_train_unet_only(TRAIN_UNET_ONLY)
     for i, data in enumerate(dataloader):
             
         mix_coeffs = data[0]
@@ -340,8 +423,11 @@ for epoch in range(1000):
 
         # Pass input_levels and target_levels to the model
         # Your model should be able to handle multiple input and target levels
-
-        if train_unet_only:
+#         print('len(input_levels)', len(input_levels))
+#         print('len(input_levels[0])', len(input_levels[0]))
+#         print('input_levels[0][0].shape', input_levels[0][0].shape)
+#         print('input_levels[0][1].shape', input_levels[0][1].shape)
+        if TRAIN_UNET_ONLY:
             output_levels = model_vqvaeunet(input_levels)
             commit_loss = []
             perplexities = []
@@ -349,11 +435,15 @@ for epoch in range(1000):
         else:
             output_levels, commit_loss, perplexities, encoding_indices_list = model_vqvaeunet(input_levels)
 
-        loss = 0.
-        recon_loss_sum = 0.
-        spect_loss_sum = 0.
-        spectvar_loss_sum = 0.
-        sisnr_loss_sum = 0.
+#         print('input_levels len:', len(input_levels))    
+#         print('output_levels len:', len(output_levels))    
+            
+        loss = torch.tensor(0., device=device)
+        recon_loss_sum = torch.tensor(0., device=device)
+        spect_loss_sum = torch.tensor(0., device=device)
+        spectvar_loss_sum = torch.tensor(0., device=device)
+        sisnr_loss_sum = torch.tensor(0., device=device)
+        ampmatch_loss_sum = torch.tensor(0., device=device)
         for i_lv in range(len(output_levels)):
             # print(i_lv, "output:", output_levels[i_lv].shape)
             # print(i_lv, "commit_loss:", commit_loss[i_lv])
@@ -361,8 +451,8 @@ for epoch in range(1000):
             # print(i_lv, "encoding_indices_list;", encoding_indices_list[i_lv].shape)
             recon_loss = F.mse_loss(output_levels[i_lv], target_levels[i_lv])
             spect_loss = spectrogram_mse_loss(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
-            spectvar_loss = multi_resolution_stft_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv], alpha=0.03)
-            sisnr_loss = si_snr_loss(output_levels[i_lv], target_levels[i_lv])
+            spectvar_loss = multi_resolution_stft_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
+            sisnr_loss = si_snr_loss_with_amplitude_constraint(output_levels[i_lv], target_levels[i_lv], input_levels[i_lv])
             # print(i_lv, "recon_loss:", recon_loss)
             # print(i_lv, "spect_loss:", spect_loss)
             # print(i_lv, "spectvar_loss:", spectvar_loss)
@@ -372,24 +462,40 @@ for epoch in range(1000):
             spect_loss_sum += spect_loss
             spectvar_loss_sum += spectvar_loss
             sisnr_loss_sum += sisnr_loss
-            if train_unet_only:
-                wandb.log({"i_lv": i_lv, "recon_loss": recon_loss.item(), "spect_loss": spect_loss.item(), "spectvar_loss": spectvar_loss.item(), "sisnr_loss": sisnr_loss.item()})
-            else:
-                wandb.log({"i_lv": i_lv, "perplexity": perplexities[i_lv], "commit_loss": commit_loss[i_lv], "recon_loss": recon_loss.item(), "spect_loss": spect_loss.item(), "spectvar_loss": spectvar_loss.item(), "sisnr_loss": sisnr_loss.item()})
+            
+            ampmatch_loss = amplitude_matching_loss(output_levels[i_lv], input_levels[i_lv], alpha=alpha)
+            ampmatch_loss_sum += ampmatch_loss
+            
+            # if TRAIN_UNET_ONLY:
+            #     wandb.log({"i_lv": i_lv, "recon_loss": recon_loss.item(), "spect_loss": spect_loss.item(), "spectvar_loss": spectvar_loss.item(), "sisnr_loss": sisnr_loss.item(), f"ampmatch_loss": ampmatch_loss.item()})
+            # else:
+            #     wandb.log({"i_lv": i_lv, "perplexity": perplexities[i_lv], "commit_loss": commit_loss[i_lv], "recon_loss": recon_loss.item(), "spect_loss": spect_loss.item(), "spectvar_loss": spectvar_loss.item(), "sisnr_loss": sisnr_loss.item(), f"ampmatch_loss": ampmatch_loss.item()})
 
-        if train_unet_only:
-            perplexity_sum = 0.
-            commit_loss_sum = 0.
+        if TRAIN_UNET_ONLY:
+            perplexity_sum = torch.tensor(0., device=device)
+            commit_loss_sum = torch.tensor(0., device=device)
         else:
             perplexity_sum = sum(perplexities)    
             commit_loss_sum = sum(commit_loss)
 
-        if train_unet_only:
-            loss += spectvar_loss_sum + sisnr_loss_sum/20 
-        elif iteration >= 1e4 and iteration < 3e4:
-            loss += commit_loss_sum + sisnr_loss_sum/180
+        if TRAIN_UNET_ONLY:
+            # if iteration < 5000:
+            #     loss += spectvar_loss_sum + sisnr_loss_sum/20 + ampmatch_loss_sum
+            # else:
+            #     loss += sisnr_loss_sum/15 + ampmatch_loss_sum
+            sisnr_loss_sum /= 20
+            loss += spectvar_loss_sum + sisnr_loss_sum + ampmatch_loss_sum
+        else:
+            # if iteration < 4e3:
+            #     loss += commit_loss_sum + spectvar_loss_sum/2 + sisnr_loss_sum/40 + ampmatch_loss_sum
+            # elif iteration >= 4e3:
+            #     loss += commit_loss_sum*2 + sisnr_loss_sum/40 + ampmatch_loss_sum
+            spectvar_loss_sum /= 2
+            sisnr_loss_sum /=40
+            loss += commit_loss_sum + spectvar_loss_sum + sisnr_loss_sum + ampmatch_loss_sum
         
-        wandb.log({"perplexity sum": perplexity_sum, "loss": loss, "commit_loss_sum": commit_loss_sum, "recon_loss_sum": recon_loss_sum, "spect_loss_sum": spect_loss_sum, "spectvar_loss_sum": spectvar_loss_sum, "sisnr_loss_sum": sisnr_loss_sum})
+        if i==0: 
+            wandb.log({"perplexity sum": perplexity_sum, "loss": loss, "commit_loss_sum": commit_loss_sum, "recon_loss_sum": recon_loss_sum, "spect_loss_sum": spect_loss_sum, "spectvar_loss_sum": spectvar_loss_sum, "sisnr_loss_sum": sisnr_loss_sum, f"ampmatch_loss_sum": ampmatch_loss_sum})
 
                     
         loss.backward()
@@ -398,76 +504,119 @@ for epoch in range(1000):
         optimizer.zero_grad()
 
         iteration += 1 # Update the iteration count
+        
+        
+#         # Set up the signal handler to save the model on keyboard interrupt
+#         model_path = 'output7/model_vq-vae-dwt3_epoch_{}.pth'
+#         if TRAIN_UNET_ONLY: model_path = 'output7/model_vq-vae-dwt3_unetonly_epoch_{}.pth'
+#         def signal_handler(signum, frame):
+#             print("Keyboard interrupt received. Saving model and exiting...")
+            
+#             # Construct the model file name with the current epoch number
+#             model_file = model_path.format(epoch)
 
+#             # Save the model to the local file system
+#             torch.save(model_vqvaeunet.state_dict(), model_file)
 
-    # Validation loop
-    with torch.no_grad():
-        for i, data in enumerate(valiloader):
+#             # # Save the model to WandB
+#             # wandb.save(model_file)
+                
+#             print("Byeeeee")
+#             # Exit the program
+#             sys.exit(0)
 
-            mix_coeffs = data[0]
-            source_coeffs = data[1]
-            input_levels = [mix.float().to(device) for mix in mix_coeffs] 
+#         # Set up the signal handler to save the model on keyboard interrupt
+#         signal.signal(signal.SIGINT, signal_handler)
 
-            target_levels = [
-                torch.stack([bass, drum, vocal, other], dim=1).squeeze(2).float().to(device)
-                for bass, drum, vocal, other in zip(*source_coeffs)
-            ]
+#     # Validation loop
+#     with torch.no_grad():
+#         for i, data in enumerate(valiloader):
 
-            # Pass input_levels and target_levels to the model
-            # Your model should be able to handle multiple input and target levels
+#             mix_coeffs = data[0]
+#             source_coeffs = data[1]
+#             input_levels = [mix.float().to(device) for mix in mix_coeffs] 
 
-            if train_unet_only:
-                output_levels = model_vqvaeunet(input_levels)
-                commit_loss = []
-                perplexities = []
-                encoding_indices_list = []
-            else:
-                output_levels, commit_loss, perplexities, encoding_indices_list = model_vqvaeunet(input_levels)
+#             target_levels = [
+#                 torch.stack([bass, drum, vocal, other], dim=1).squeeze(2).float().to(device)
+#                 for bass, drum, vocal, other in zip(*source_coeffs)
+#             ]
 
-            loss = 0.
-            recon_loss_sum = 0.
-            spect_loss_sum = 0.
-            spectvar_loss_sum = 0.
-            sisnr_loss_sum = 0.
-            for i_lv in range(len(output_levels)):
-                # print(i_lv, "output:", output_levels[i_lv].shape)
-                # print(i_lv, "commit_loss:", commit_loss[i_lv])
-                # print(i_lv, "perplexity:", perplexities[i_lv])
-                # print(i_lv, "encoding_indices_list;", encoding_indices_list[i_lv].shape)
-                recon_loss = F.mse_loss(output_levels[i_lv], target_levels[i_lv])
-                spect_loss = spectrogram_mse_loss(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
-                spectvar_loss = multi_resolution_stft_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv], alpha=0.03)
-                sisnr_loss = si_snr_loss(output_levels[i_lv], target_levels[i_lv])
-                # print(i_lv, "recon_loss:", recon_loss)
-                # print(i_lv, "spect_loss:", spect_loss)
-                # print(i_lv, "spectvar_loss:", spectvar_loss)
-                # print(i_lv, "sisnr_loss:", sisnr_loss)
-                # loss += commit_loss[i_lv] + spectvar_loss + sisnr_loss/20
-                recon_loss_sum += recon_loss
-                spect_loss_sum += spect_loss
-                spectvar_loss_sum += spectvar_loss
-                sisnr_loss_sum += sisnr_loss
-                if train_unet_only:
-                    wandb.log({"val i_lv": i_lv, "val recon_loss": recon_loss.item(), "val spect_loss": spect_loss.item(), "val spectvar_loss": spectvar_loss.item(), "sisnr_loss": sisnr_loss.item()})
-                else:
-                    wandb.log({"val i_lv": i_lv, "val perplexity": perplexities[i_lv], "val commit_loss": commit_loss[i_lv], "val recon_loss": recon_loss.item(), "val spect_loss": spect_loss.item(), "val spectvar_loss": spectvar_loss.item(), "val sisnr_loss": sisnr_loss.item()})
+#             # Pass input_levels and target_levels to the model
+#             # Your model should be able to handle multiple input and target levels
 
-            if train_unet_only:
-                perplexity_sum = 0.
-                commit_loss_sum = 0.
-            else:
-                perplexity_sum = sum(perplexities)    
-                commit_loss_sum = sum(commit_loss)
+#             if TRAIN_UNET_ONLY:
+#                 output_levels = model_vqvaeunet(input_levels)
+#                 commit_val_loss = []
+#                 val_perplexities = []
+#                 encoding_indices_list = []
+#             else:
+#                 output_levels, commit_val_loss, val_perplexities, encoding_indices_list = model_vqvaeunet(input_levels)
 
-            if train_unet_only:
-                loss += spectvar_loss_sum + sisnr_loss_sum/20 
-            elif iteration >= 1e4 and iteration < 3e4:
-                loss += commit_loss_sum + sisnr_loss_sum/180
+#             val_loss = torch.tensor(0., device=device)
+#             recon_val_loss_sum = torch.tensor(0., device=device)
+#             spect_val_loss_sum = torch.tensor(0., device=device)
+#             spectvar_val_loss_sum = torch.tensor(0., device=device)
+#             sisnr_val_loss_sum = torch.tensor(0., device=device)
+#             ampmatch_val_loss_sum = torch.tensor(0., device=device)
+#             for i_lv in range(len(output_levels)):
+#                 # print(i_lv, "output:", output_levels[i_lv].shape)
+#                 # print(i_lv, "commit_val_loss:", commit_val_loss[i_lv])
+#                 # print(i_lv, "val_perplexity:", val_perplexities[i_lv])
+#                 # print(i_lv, "encoding_indices_list;", encoding_indices_list[i_lv].shape)
+#                 recon_val_loss = F.mse_val_loss(output_levels[i_lv], target_levels[i_lv])
+#                 spect_val_loss = spectrogram_mse_val_loss(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
+#                 spectvar_val_loss = multi_resolution_stft_val_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
+#                 sisnr_val_loss = si_snr_val_loss_with_amplitude_constraint(output_levels[i_lv], target_levels[i_lv], input_levels[i_lv])
+#                 # print(i_lv, "recon_val_loss:", recon_val_loss)
+#                 # print(i_lv, "spect_val_loss:", spect_val_loss)
+#                 # print(i_lv, "spectvar_val_loss:", spectvar_val_loss)
+#                 # print(i_lv, "sisnr_val_loss:", sisnr_val_loss)
+#                 # val_loss += commit_val_loss[i_lv] + spectvar_val_loss + sisnr_val_loss/20
+#                 recon_val_loss_sum += recon_val_loss
+#                 spect_val_loss_sum += spect_val_loss
+#                 spectvar_val_loss_sum += spectvar_val_loss
+#                 sisnr_val_loss_sum += sisnr_val_loss
+#                 ampmatch_val_loss = amplitude_matching_val_loss(output_levels[i_lv], input_levels[i_lv], alpha=alpha)
+#                 ampmatch_val_loss_sum += ampmatch_val_loss
+#                 # if TRAIN_UNET_ONLY:
+#                 #     wandb.log({"val i_lv": i_lv, "val recon_val_loss": recon_val_loss.item(), "val spect_val_loss": spect_val_loss.item(), "val spectvar_val_loss": spectvar_val_loss.item(), "val sisnr_val_loss": sisnr_val_loss.item(), f"val ampmatch_val_loss": ampmatch_val_loss.item()})
+#                 # else:
+#                 #     wandb.log({"val i_lv": i_lv, "val val_perplexity": val_perplexities[i_lv], "val commit_val_loss": commit_val_loss[i_lv], "val recon_val_loss": recon_val_loss.item(), "val spect_val_loss": spect_val_loss.item(), "val spectvar_val_loss": spectvar_val_loss.item(), "val sisnr_val_loss": sisnr_val_loss.item(), f"val ampmatch_val_loss": ampmatch_val_loss.item()})
 
-            wandb.log({"val perplexity sum": perplexity_sum, "val loss": loss, "val commit_loss_sum": commit_loss_sum, "val recon_loss_sum": recon_loss_sum, "val spect_loss_sum": spect_loss_sum, "val spectvar_loss_sum": spectvar_loss_sum, "val sisnr_loss_sum": sisnr_loss_sum})
+#             if TRAIN_UNET_ONLY:
+#                 val_perplexity_sum = torch.tensor(0., device=device)
+#                 commit_val_loss_sum = torch.tensor(0., device=device)
+#             else:
+#                 val_perplexity_sum = sum(val_perplexities)    
+#                 commit_val_loss_sum = sum(commit_val_loss)
 
+#             if TRAIN_UNET_ONLY:
+#                 # if iteration < 5000:
+#                 #     val_loss += spectvar_val_loss_sum + sisnr_val_loss_sum/20 + ampmatch_val_loss_sum
+#                 # else:
+#                 #     val_loss += sisnr_val_loss_sum/15 + ampmatch_val_loss_sum
+#                 sisnr_val_loss_sum /= 20
+#                 val_loss += spectvar_val_loss_sum + sisnr_val_loss_sum + ampmatch_val_loss_sum
+#             else:
+#                 # if iteration < 4e3:
+#                 #     val_loss += commit_val_loss_sum + spectvar_val_loss_sum/2 + sisnr_val_loss_sum/40 + ampmatch_val_loss_sum
+#                 # elif iteration >= 4e3:
+#                 #     val_loss += commit_val_loss_sum*2 + sisnr_val_loss_sum/40 + ampmatch_val_loss_sum
+#                 spectvar_val_loss_sum /= 2
+#                 sisnr_val_loss_sum /=40
+#                 val_loss += commit_val_loss_sum + spectvar_val_loss_sum + sisnr_val_loss_sum + ampmatch_val_loss_sum
+        
+#             wandb.log({"val perplexity sum": val_perplexity_sum, "val loss": val_loss, "val commit_loss_sum": commit_val_loss_sum, "val recon_loss_sum": recon_val_loss_sum, "val spect_loss_sum": spect_val_loss_sum, "val spectvar_loss_sum": spectvar_val_loss_sum, "val sisnr_loss_sum": sisnr_val_loss_sum, f"val ampmatch_loss_sum": ampmatch_val_loss_sum})
+
+    # scheduler.step()
+    
 # Detach hook
 # handle.remove()
+# Save the model to disk
+if TRAIN_UNET_ONLY:
+    torch.save(model_vqvaeunet.state_dict(), f"output7/model_vq-vae-dwt3_unetonly_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_nlevel_{NLEVEL}_songlen_{SONGLEN}.pth")
+else:    
+    torch.save(model_vqvaeunet.state_dict(), f"output7/model_vq-vae-dwt3_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_nlevel_{NLEVEL}_songlen_{SONGLEN}.pth")
 
 wandb.finish()
 
@@ -483,10 +632,9 @@ from scipy.io import wavfile
 model_vqvaeunet.eval()
 
 with torch.no_grad():
-    train_unet_only = True
-    model_vqvaeunet.set_train_unet_only(train_unet_only)
-    for i, data in enumerate(dataloader):
-    # for i, data in enumerate(valiloader):
+    model_vqvaeunet.set_train_unet_only(TRAIN_UNET_ONLY)
+    # for i, data in enumerate(dataloader):
+    for i, data in enumerate(valiloader):
         mix_coeffs = data[0]
         source_coeffs = data[1]
         input_levels = [mix.float().to(device) for mix in mix_coeffs] 
@@ -496,7 +644,7 @@ with torch.no_grad():
             for bass, drum, vocal, other in zip(*source_coeffs)
         ]
 
-        if train_unet_only:
+        if TRAIN_UNET_ONLY:
             output_levels = model_vqvaeunet(input_levels)
             commit_loss = []
             perplexities = []
@@ -504,11 +652,12 @@ with torch.no_grad():
         else:
             output_levels, commit_loss, perplexities, encoding_indices_list = model_vqvaeunet(input_levels)
 
-        loss = 0.
-        recon_loss_sum = 0.
-        spect_loss_sum = 0.
-        spectvar_loss_sum = 0.
-        sisnr_loss_sum = 0.
+        loss = torch.tensor(0., device=device)
+        recon_loss_sum = torch.tensor(0., device=device)
+        spect_loss_sum = torch.tensor(0., device=device)
+        spectvar_loss_sum = torch.tensor(0., device=device)
+        sisnr_loss_sum = torch.tensor(0., device=device)
+        ampmatch_loss_sum = torch.tensor(0., device=device)
         for i_lv in range(len(output_levels)):
             # print(i_lv, "output:", output_levels[i_lv].shape)
             # print(i_lv, "commit_loss:", commit_loss[i_lv])
@@ -516,8 +665,8 @@ with torch.no_grad():
             # print(i_lv, "encoding_indices_list;", encoding_indices_list[i_lv].shape)
             recon_loss = F.mse_loss(output_levels[i_lv], target_levels[i_lv])
             spect_loss = spectrogram_mse_loss(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
-            spectvar_loss = multi_resolution_stft_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv], alpha=0.03)
-            sisnr_loss = si_snr_loss(output_levels[i_lv], target_levels[i_lv])
+            spectvar_loss = multi_resolution_stft_loss_with_amplitude_constraint(input_levels[i_lv], output_levels[i_lv], target_levels[i_lv])
+            sisnr_loss = si_snr_loss_with_amplitude_constraint(output_levels[i_lv], target_levels[i_lv], input_levels[i_lv])
             # print(i_lv, "recon_loss:", recon_loss)
             # print(i_lv, "spect_loss:", spect_loss)
             # print(i_lv, "spectvar_loss:", spectvar_loss)
@@ -527,19 +676,32 @@ with torch.no_grad():
             spect_loss_sum += spect_loss
             spectvar_loss_sum += spectvar_loss
             sisnr_loss_sum += sisnr_loss
+            ampmatch_loss = amplitude_matching_loss(output_levels[i_lv], input_levels[i_lv], alpha=alpha)
+            ampmatch_loss_sum += ampmatch_loss
 
-        if train_unet_only:
-            perplexity_sum = 0.
-            commit_loss_sum = 0.
+        if TRAIN_UNET_ONLY:
+            perplexity_sum = torch.tensor(0., device=device)
+            commit_loss_sum = torch.tensor(0., device=device)
         else:
             perplexity_sum = sum(perplexities)    
             commit_loss_sum = sum(commit_loss)
 
-        if train_unet_only:
-            loss += spectvar_loss_sum + sisnr_loss_sum/20 
-        elif iteration >= 1e4 and iteration < 3e4:
-            loss += commit_loss_sum + sisnr_loss_sum/180
-        
+        if TRAIN_UNET_ONLY:
+            # if iteration < 5000:
+            #     loss += spectvar_loss_sum + sisnr_loss_sum/20 + ampmatch_loss_sum
+            # else:
+            #     loss += sisnr_loss_sum/15 + ampmatch_loss_sum
+            sisnr_loss_sum /= 20
+            loss += spectvar_loss_sum + sisnr_loss_sum + ampmatch_loss_sum
+        else:
+            # if iteration < 4e3:
+            #     loss += commit_loss_sum + spectvar_loss_sum/2 + sisnr_loss_sum/40 + ampmatch_loss_sum
+            # elif iteration >= 4e3:
+            #     loss += commit_loss_sum*2 + sisnr_loss_sum/40 + ampmatch_loss_sum
+            spectvar_loss_sum /= 2
+            sisnr_loss_sum /=40
+            loss += commit_loss_sum + spectvar_loss_sum + sisnr_loss_sum + ampmatch_loss_sum
+               
         coeff_input = [coeff_input[0] for coeff_input in input_levels]
 
         coeff_target_bas = [coeff_target[0][0].unsqueeze(0) for coeff_target in target_levels]
@@ -565,64 +727,74 @@ with torch.no_grad():
         out_voc_l_rec = readaudio.waverec(coeffs=coeff_output_voc, wavelet='db8')
         out_oth_l_rec = readaudio.waverec(coeffs=coeff_output_oth, wavelet='db8')
         
-        print('input')
-        display(ipd.Audio(mix_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('target bass')
-        display(ipd.Audio(tar_bas_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('output bass')
-        display(ipd.Audio(out_bas_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('target drum')
-        display(ipd.Audio(tar_drm_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('output drum')
-        display(ipd.Audio(out_drm_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('target vocal')
-        display(ipd.Audio(tar_voc_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('output vocal')
-        display(ipd.Audio(out_voc_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('target other')
-        display(ipd.Audio(tar_oth_l_rec.cpu().numpy().ravel(), rate = 16000))
-        print('output other')
-        display(ipd.Audio(out_oth_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('input')
+#         display(ipd.Audio(mix_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('target bass')
+#         display(ipd.Audio(tar_bas_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('output bass')
+#         display(ipd.Audio(out_bas_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('target drum')
+#         display(ipd.Audio(tar_drm_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('output drum')
+#         display(ipd.Audio(out_drm_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('target vocal')
+#         display(ipd.Audio(tar_voc_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('output vocal')
+#         display(ipd.Audio(out_voc_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('target other')
+#         display(ipd.Audio(tar_oth_l_rec.cpu().numpy().ravel(), rate = 16000))
+#         print('output other')
+#         display(ipd.Audio(out_oth_l_rec.cpu().numpy().ravel(), rate = 16000))
 
-        wavfile.write('output/trained_dwt_bass.wav', 16000, out_bas_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/trained_dwt_drum.wav', 16000, out_drm_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/trained_dwt_vocal.wav', 16000, out_voc_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/trained_dwt_other.wav', 16000, out_oth_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/target_dwt_bass.wav', 16000, tar_bas_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/target_dwt_drum.wav', 16000, tar_drm_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/target_dwt_vocal.wav', 16000, tar_voc_l_rec.cpu().numpy().ravel())
-        wavfile.write('output/target_dwt_other.wav', 16000, tar_oth_l_rec.cpu().numpy().ravel())
+        if TRAIN_UNET_ONLY:
+            wavfile.write(f'output7/trained_unetonly_dwt_bass_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_bas_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_unetonly_dwt_drum_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_drm_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_unetonly_dwt_vocal_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_voc_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_unetonly_dwt_other_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_oth_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_unetonly_dwt_bass_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_bas_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_unetonly_dwt_drum_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_drm_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_unetonly_dwt_vocal_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_voc_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_unetonly_dwt_other_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_oth_l_rec.cpu().numpy().ravel())
+        else:
+            wavfile.write(f'output7/trained_dwt_bass_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_bas_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_dwt_drum_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_drm_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_dwt_vocal_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_voc_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/trained_dwt_other_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, out_oth_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_dwt_bass_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_bas_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_dwt_drum_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_drm_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_dwt_vocal_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_voc_l_rec.cpu().numpy().ravel())
+            wavfile.write(f'output7/target_dwt_other_lr_{LEARNING_RATE}_nlevel_{NLEVEL}_{i}.wav', 16000, tar_oth_l_rec.cpu().numpy().ravel())
 
-        #plot the mixes tensor and sources tensor
-        plt.figure(figsize=(20, 10))
-        plt.subplot(2, 1, 1)
+#         #plot the mixes tensor and sources tensor
+#         plt.figure(figsize=(20, 10))
+#         plt.subplot(2, 1, 1)
 
-        plt.plot(mix_l_rec.cpu().numpy())
-        plt.title('mixes')
-        plt.subplot(2, 1, 2)
-        plt.plot(tar_bas_l_rec.cpu().numpy(), label='target bass', color='red', alpha=0.3)
-        plt.plot(tar_drm_l_rec.cpu().numpy(), label='target drums', color='blue', alpha=0.3)
-        plt.plot(tar_voc_l_rec.cpu().numpy(), label='target vocals', color='cyan', alpha=0.3)
-        plt.plot(tar_oth_l_rec.cpu().numpy(), label='target others', color='orange', alpha=0.3)
-        plt.legend(loc='upper left')
-        plt.title('sources')
-        plt.show()
+#         plt.plot(mix_l_rec.cpu().numpy().reval())
+#         plt.title('mixes')
+#         plt.subplot(2, 1, 2)
+#         plt.plot(tar_bas_l_rec.cpu().numpy().reval(), label='target bass', color='red', alpha=0.3)
+#         plt.plot(tar_drm_l_rec.cpu().numpy().reval(), label='target drums', color='blue', alpha=0.3)
+#         plt.plot(tar_voc_l_rec.cpu().numpy().reval(), label='target vocals', color='cyan', alpha=0.3)
+#         plt.plot(tar_oth_l_rec.cpu().numpy().reval(), label='target others', color='orange', alpha=0.3)
+#         plt.legend(loc='upper left')
+#         plt.title('sources')
+#         plt.show()
 
-        #plot the output tensor with the sources tensor
-        plt.figure(figsize=(20, 10))
-        plt.subplot(2, 1, 1)
-        plt.plot(out_bas_l_rec.cpu().numpy(), label='trained bass', color='red', alpha=0.3)
-        plt.plot(out_drm_l_rec.cpu().numpy(), label='trained drums', color='blue', alpha=0.3)
-        plt.plot(out_voc_l_rec.cpu().numpy(), label='trained vocals', color='cyan', alpha=0.3)
-        plt.plot(out_oth_l_rec.cpu().numpy(), label='trained others', color='orange', alpha=0.3)
-        plt.legend(loc='upper left')
-        plt.title('output')
-        plt.subplot(2, 1, 2)
-        plt.plot(tar_bas_l_rec.cpu().numpy(), label='target bass', color='red', alpha=0.3)
-        plt.plot(tar_drm_l_rec.cpu().numpy(), label='target drums', color='blue', alpha=0.3)
-        plt.plot(tar_voc_l_rec.cpu().numpy(), label='target vocals', color='cyan', alpha=0.3)
-        plt.plot(tar_oth_l_rec.cpu().numpy(), label='target others', color='orange', alpha=0.3)
-        plt.legend(loc='upper left')
-        plt.title('sources')
-        plt.show()
+#         #plot the output tensor with the sources tensor
+#         plt.figure(figsize=(20, 10))
+#         plt.subplot(2, 1, 1)
+#         plt.plot(out_bas_l_rec.cpu().numpy().reval(), label='trained bass', color='red', alpha=0.3)
+#         plt.plot(out_drm_l_rec.cpu().numpy().reval(), label='trained drums', color='blue', alpha=0.3)
+#         plt.plot(out_voc_l_rec.cpu().numpy().reval(), label='trained vocals', color='cyan', alpha=0.3)
+#         plt.plot(out_oth_l_rec.cpu().numpy().reval(), label='trained others', color='orange', alpha=0.3)
+#         plt.legend(loc='upper left')
+#         plt.title('output')
+#         plt.subplot(2, 1, 2)
+#         plt.plot(tar_bas_l_rec.cpu().numpy().reval(), label='target bass', color='red', alpha=0.3)
+#         plt.plot(tar_drm_l_rec.cpu().numpy().reval(), label='target drums', color='blue', alpha=0.3)
+#         plt.plot(tar_voc_l_rec.cpu().numpy().reval(), label='target vocals', color='cyan', alpha=0.3)
+#         plt.plot(tar_oth_l_rec.cpu().numpy().reval(), label='target others', color='orange', alpha=0.3)
+#         plt.legend(loc='upper left')
+#         plt.title('sources')
+#         plt.show()
 
