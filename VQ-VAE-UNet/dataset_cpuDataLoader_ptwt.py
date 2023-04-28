@@ -23,13 +23,15 @@ def find_nearest(array, value):
     return idx
 
 class readAudio():
-    def __init__(self, mix_dir, src_dir, logscale, downsample, device):
+    def __init__(self, mix_dir, src_dir, logscale, downsample, device, dwt=True, nlevel=6):
         self.mix_dir = mix_dir
         self.src_dir = src_dir
         self.mixture = os.listdir(mix_dir)
         self.logscale = logscale
         self.device = device
         self.downsample = downsample
+        self.dwt = dwt
+        self.nlevel = nlevel
         
     def __len__(self):
         return len(self.mixture)
@@ -42,8 +44,10 @@ class readAudio():
             
         if self.downsample == True:
             print('Downsampling the audio by',  target_sample_rate, 'Hz')
+        
+        if self.dwt == True:
+            print('DWT ing with nlevel of', self.nlevel)
             
-        nlevel = 6
         output_arr = []
         max_arr = []
 
@@ -56,7 +60,9 @@ class readAudio():
             drums_path  = os.path.join(self.src_dir, self.mixture[index]) + '/drums.wav'
             vocals_path = os.path.join(self.src_dir, self.mixture[index]) + '/vocals.wav'
             other_path = os.path.join(self.src_dir, self.mixture[index]) + '/other.wav'
-
+            
+            # print(mix_path)
+            
             fs_mix,    data_mix    = wavfile.read(mix_path)
             fs_bass,   data_bass   = wavfile.read(bass_path)
             fs_drums,  data_drums  = wavfile.read(drums_path)
@@ -196,32 +202,44 @@ class readAudio():
                         out_r_other_downsampled = downsample_audio(out_r_other, original_sample_rate, target_sample_rate)
             
                         if self.downsample == True:
-                            coeffs_mix_l_dec_list = ptwt.wavedec(out_l_mix_downsampled, 'db8', level=nlevel)
-                            coeffs_bas_l_dec_list = ptwt.wavedec(out_l_bass_downsampled, 'db8', level=nlevel)
-                            coeffs_drm_l_dec_list = ptwt.wavedec(out_l_drums_downsampled, 'db8', level=nlevel)
-                            coeffs_voc_l_dec_list = ptwt.wavedec(out_l_vocals_downsampled, 'db8', level=nlevel)
-                            coeffs_oth_l_dec_list = ptwt.wavedec(out_l_other_downsampled, 'db8', level=nlevel)
-                            coeffs_mix_r_dec_list = ptwt.wavedec(out_r_mix_downsampled, 'db8', level=nlevel)
-                            coeffs_bas_r_dec_list = ptwt.wavedec(out_r_bass_downsampled, 'db8', level=nlevel)
-                            coeffs_drm_r_dec_list = ptwt.wavedec(out_r_drums_downsampled, 'db8', level=nlevel)
-                            coeffs_voc_r_dec_list = ptwt.wavedec(out_r_vocals_downsampled, 'db8', level=nlevel)
-                            coeffs_oth_r_dec_list = ptwt.wavedec(out_r_other_downsampled, 'db8', level=nlevel)
-                            mix_l_tuple = ((coeffs_mix_l_dec_list), (coeffs_bas_l_dec_list, coeffs_drm_l_dec_list, coeffs_voc_l_dec_list, coeffs_oth_l_dec_list))
-                            mix_r_tuple = ((coeffs_mix_r_dec_list), (coeffs_bas_r_dec_list, coeffs_drm_r_dec_list, coeffs_voc_r_dec_list, coeffs_oth_r_dec_list))
-
+                            coeffs_mix_l_dec_list = ptwt.wavedec(out_l_mix_downsampled, 'db8', level=self.nlevel)
+                            coeffs_bas_l_dec_list = ptwt.wavedec(out_l_bass_downsampled, 'db8', level=self.nlevel)
+                            coeffs_drm_l_dec_list = ptwt.wavedec(out_l_drums_downsampled, 'db8', level=self.nlevel)
+                            coeffs_voc_l_dec_list = ptwt.wavedec(out_l_vocals_downsampled, 'db8', level=self.nlevel)
+                            coeffs_oth_l_dec_list = ptwt.wavedec(out_l_other_downsampled, 'db8', level=self.nlevel)
+                            coeffs_mix_r_dec_list = ptwt.wavedec(out_r_mix_downsampled, 'db8', level=self.nlevel)
+                            coeffs_bas_r_dec_list = ptwt.wavedec(out_r_bass_downsampled, 'db8', level=self.nlevel)
+                            coeffs_drm_r_dec_list = ptwt.wavedec(out_r_drums_downsampled, 'db8', level=self.nlevel)
+                            coeffs_voc_r_dec_list = ptwt.wavedec(out_r_vocals_downsampled, 'db8', level=self.nlevel)
+                            coeffs_oth_r_dec_list = ptwt.wavedec(out_r_other_downsampled, 'db8', level=self.nlevel)
+                            if self.dwt == True:
+                                mix_l_tuple = ((coeffs_mix_l_dec_list), (coeffs_bas_l_dec_list, coeffs_drm_l_dec_list, coeffs_voc_l_dec_list, coeffs_oth_l_dec_list))
+                                mix_r_tuple = ((coeffs_mix_r_dec_list), (coeffs_bas_r_dec_list, coeffs_drm_r_dec_list, coeffs_voc_r_dec_list, coeffs_oth_r_dec_list))
+                            else:
+                                # mix_l_tuple = ((out_l_mix_downsampled), (out_l_bass_downsampled, out_l_drums_downsampled, out_l_vocals_downsampled, out_l_other_downsampled))
+                                # mix_r_tuple = ((out_r_mix_downsampled), (out_r_bass_downsampled, out_r_drums_downsampled, out_r_vocals_downsampled, out_r_other_downsampled))
+                                mix_l_tuple = (([out_l_mix_downsampled.unsqueeze(0)]), ([out_l_bass_downsampled.unsqueeze(0)], [out_l_drums_downsampled.unsqueeze(0)], [out_l_vocals_downsampled.unsqueeze(0)], [out_l_other_downsampled.unsqueeze(0)]))
+                                mix_r_tuple = (([out_r_mix_downsampled.unsqueeze(0)]), ([out_r_bass_downsampled.unsqueeze(0)], [out_r_drums_downsampled.unsqueeze(0)], [out_r_vocals_downsampled.unsqueeze(0)], [out_r_other_downsampled.unsqueeze(0)]))
+                                
                         else:
-                            coeffs_mix_l_dec_list = ptwt.wavedec(out_l_mix, 'db8', level=nlevel)
-                            coeffs_bas_l_dec_list = ptwt.wavedec(out_l_bass, 'db8', level=nlevel)
-                            coeffs_drm_l_dec_list = ptwt.wavedec(out_l_drums, 'db8', level=nlevel)
-                            coeffs_voc_l_dec_list = ptwt.wavedec(out_l_vocals, 'db8', level=nlevel)
-                            coeffs_oth_l_dec_list = ptwt.wavedec(out_l_other, 'db8', level=nlevel)
-                            coeffs_mix_r_dec_list = ptwt.wavedec(out_r_mix, 'db8', level=nlevel)
-                            coeffs_bas_r_dec_list = ptwt.wavedec(out_r_bass, 'db8', level=nlevel)
-                            coeffs_drm_r_dec_list = ptwt.wavedec(out_r_drums, 'db8', level=nlevel)
-                            coeffs_voc_r_dec_list = ptwt.wavedec(out_r_vocals, 'db8', level=nlevel)
-                            coeffs_oth_r_dec_list = ptwt.wavedec(out_r_other, 'db8', level=nlevel)
-                            mix_l_tuple = ((coeffs_mix_l_dec_list), (coeffs_bas_l_dec_list, coeffs_drm_l_dec_list, coeffs_voc_l_dec_list, coeffs_oth_l_dec_list))
-                            mix_r_tuple = ((coeffs_mix_r_dec_list), (coeffs_bas_r_dec_list, coeffs_drm_r_dec_list, coeffs_voc_r_dec_list, coeffs_oth_r_dec_list))
+                            coeffs_mix_l_dec_list = ptwt.wavedec(out_l_mix, 'db8', level=self.nlevel)
+                            coeffs_bas_l_dec_list = ptwt.wavedec(out_l_bass, 'db8', level=self.nlevel)
+                            coeffs_drm_l_dec_list = ptwt.wavedec(out_l_drums, 'db8', level=self.nlevel)
+                            coeffs_voc_l_dec_list = ptwt.wavedec(out_l_vocals, 'db8', level=self.nlevel)
+                            coeffs_oth_l_dec_list = ptwt.wavedec(out_l_other, 'db8', level=self.nlevel)
+                            coeffs_mix_r_dec_list = ptwt.wavedec(out_r_mix, 'db8', level=self.nlevel)
+                            coeffs_bas_r_dec_list = ptwt.wavedec(out_r_bass, 'db8', level=self.nlevel)
+                            coeffs_drm_r_dec_list = ptwt.wavedec(out_r_drums, 'db8', level=self.nlevel)
+                            coeffs_voc_r_dec_list = ptwt.wavedec(out_r_vocals, 'db8', level=self.nlevel)
+                            coeffs_oth_r_dec_list = ptwt.wavedec(out_r_other, 'db8', level=self.nlevel)
+                            if self.dwt == True:
+                                mix_l_tuple = ((coeffs_mix_l_dec_list), (coeffs_bas_l_dec_list, coeffs_drm_l_dec_list, coeffs_voc_l_dec_list, coeffs_oth_l_dec_list))
+                                mix_r_tuple = ((coeffs_mix_r_dec_list), (coeffs_bas_r_dec_list, coeffs_drm_r_dec_list, coeffs_voc_r_dec_list, coeffs_oth_r_dec_list))
+                            else:
+                                # mix_l_tuple = ((out_l_mix), (out_l_bass, out_l_drums, out_l_vocals, out_l_other))
+                                # mix_r_tuple = ((out_r_mix), (out_r_bass, out_r_drums, out_r_vocals, out_r_other))
+                                mix_l_tuple = (([out_l_mix.unsqueeze(0)]), ([out_l_bass.unsqueeze(0)], [out_l_drums.unsqueeze(0)], [out_l_vocals.unsqueeze(0)], [out_l_other.unsqueeze(0)]))
+                                mix_r_tuple = (([out_r_mix.unsqueeze(0)]), ([out_r_bass.unsqueeze(0)], [out_r_drums.unsqueeze(0)], [out_r_vocals.unsqueeze(0)], [out_r_other.unsqueeze(0)]))
 
 
 #                         mix_l_tuple = ((out_l_mix), (out_l_bass, out_l_drums, out_l_vo))
