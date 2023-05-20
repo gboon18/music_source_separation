@@ -478,7 +478,7 @@ def compute_istft(complex_spectrogram, n_fft, hop_length):
     return signal
 
 
-readaudio = readAudio('/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Mixtures/Dev', '/pscratch/sd/h/hsko/jupyter/jupyter/ML/FCN/sound/audio_spectrogram/dataset/DSD100/Sources/Dev', False, True, device)
+readaudio = readAudio('/path/to/training/audio/mix', '/path/to/training/audio/sources', False, True, device)
 if DATARERAMP[0] == -999 and DATARERAMP[1] == -999 :
     audios = readaudio.__getitem__(1, 44100*SONGLEN, rand_amp=False)
 else:
@@ -491,10 +491,10 @@ model_drum = VQVAEWithUNet(1, 1, hidden_channels=HIDDEN_CH, num_embeddings=NUM_E
 model_voca = VQVAEWithUNet(1, 1, hidden_channels=HIDDEN_CH, num_embeddings=NUM_EMBED, embedding_dim=EMBED_DIM, kernel_size = 5, stride=4).to(device) # conv kernel_size resample1d stride_size
 model_othr = VQVAEWithUNet(1, 1, hidden_channels=HIDDEN_CH, num_embeddings=NUM_EMBED, embedding_dim=EMBED_DIM, kernel_size = 5, stride=4).to(device) # conv kernel_size resample1d stride_size
 if CONTRAIN != -999 :
-    saved_model_bass = f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_bass_vq-vae-spectro_lr_1e-05_epoch_{CONTRAIN}_songlen_{SONGLEN}.pth'
-    saved_model_drum = f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_drum_vq-vae-spectro_lr_1e-05_epoch_{CONTRAIN}_songlen_{SONGLEN}.pth'
-    saved_model_voca = f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_voca_vq-vae-spectro_lr_1e-05_epoch_{CONTRAIN}_songlen_{SONGLEN}.pth'
-    saved_model_othr = f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_othr_vq-vae-spectro_lr_1e-05_epoch_{CONTRAIN}_songlen_{SONGLEN}.pth'
+    saved_model_bass = f'/path/to/saved/bass/model.pth'
+    saved_model_drum = f'/path/to/saved/drum/model.pth'
+    saved_model_voca = f'/path/to/saved/voca/model.pth'
+    saved_model_othr = f'/path/to/saved/othr/model.pth'
     print('continue traing from', saved_model_bass)
     print('continue traing from', saved_model_drum)
     print('continue traing from', saved_model_voca)
@@ -807,62 +807,15 @@ for epoch in range(NUM_EPOCH):
                 swa_model_othr.update_parameters(model_othr)
                 
         elapsed_time = time.time() - last_time
-        if elapsed_time >= time_limit or epoch % 100 == 0:
-            # Save the model
-            torch.save(model_bass.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_bass_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{epoch}_songlen_{SONGLEN}.pth")
-            torch.save(model_drum.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_drum_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{epoch}_songlen_{SONGLEN}.pth")
-            torch.save(model_voca.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_voca_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{epoch}_songlen_{SONGLEN}.pth")
-            torch.save(model_othr.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_othr_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{epoch}_songlen_{SONGLEN}.pth")
-            print("Model saved at {:.2f} hours.".format(elapsed_time / 3600))
+        if elapsed_time >= time_limit
             last_time = time.time()  # update the last_time variable
             if TIMLIM != -999:
                 break
 
-        with torch.no_grad():
-            if epoch % 100 == 0:
-                if i == 0 :
-                    output_bass, _, _, _ = model_bass(multi_scale_inputs[0])
-                    output_drum, _, _, _ = model_drum(multi_scale_inputs[0])
-                    output_voca, _, _, _ = model_voca(multi_scale_inputs[0])
-                    output_othr, _, _, _ = model_othr(multi_scale_inputs[0])
-
-                    plt.figure(figsize=(10, 10))
-                    plt.subplot(2, 2, 1)          
-                    plt.plot(multi_scale_inputs[i_scale][1,0,:].detach().cpu().numpy(), label='mix', color='gray', alpha=0.3)
-                    plt.plot(multi_scale_tar_bass[i_scale][1,0,:].detach().cpu().numpy(), label='bass target', color = 'magenta', alpha=0.3)
-                    plt.plot(output_bass[1,0,:].detach().cpu().numpy(), label='bass train', color = 'red', alpha=0.3)
-                    plt.legend(loc='upper right')
-                    plt.subplot(2, 2, 2)          
-                    plt.plot(multi_scale_inputs[i_scale][1,0,:].detach().cpu().numpy(), label='mix', color='gray', alpha=0.3)
-                    plt.plot(multi_scale_tar_drum[i_scale][1,0,:].detach().cpu().numpy(), label='drum target', color = 'magenta', alpha=0.3)
-                    plt.plot(output_drum[1,0,:].detach().cpu().numpy(), label='drum train', color = 'red', alpha=0.3)
-                    plt.legend(loc='upper right')
-                    plt.subplot(2, 2, 3)          
-                    plt.plot(multi_scale_inputs[i_scale][1,0,:].detach().cpu().numpy(), label='mix', color='gray', alpha=0.3)
-                    plt.plot(multi_scale_tar_voca[i_scale][1,0,:].detach().cpu().numpy(), label='vocal target', color = 'magenta', alpha=0.3)
-                    plt.plot(output_voca[1,0,:].detach().cpu().numpy(), label='vocal train', color = 'red', alpha=0.3)
-                    plt.legend(loc='upper right')
-                    plt.subplot(2, 2, 4)          
-                    plt.plot(multi_scale_inputs[i_scale][1,0,:].detach().cpu().numpy(), label='mix', color='gray', alpha=0.3)
-                    plt.plot(multi_scale_tar_othr[i_scale][1,0,:].detach().cpu().numpy(), label='other target', color = 'magenta', alpha=0.3)
-                    plt.plot(output_othr[1,0,:].detach().cpu().numpy(), label='other train', color = 'red', alpha=0.3)
-                    plt.legend(loc='upper right')
-                    plt.savefig(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/epoch_{epoch}_{LEARNING_RATE}_songlen_{SONGLEN}.png')
-                    plt.clf()
-                    plt.close()                
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/mix_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, multi_scale_inputs[i_scale][i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/tar_bas_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, multi_scale_tar_bass[i_scale][i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/out_bas_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, output_bass[i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/tar_drm_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, multi_scale_tar_drum[i_scale][i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/out_drm_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, output_drum[i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/tar_voc_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, multi_scale_tar_voca[i_scale][i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/out_voc_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, output_voca[i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/tar_oth_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, multi_scale_tar_othr[i_scale][i,0,:].detach().cpu().numpy().ravel())
-                    wavfile.write(f'/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/out_oth_{i}_scale_{i_scale}_lr_{LEARNING_RATE}_epoch_{epoch}.wav', 16000, output_othr[i,0,:].detach().cpu().numpy().ravel())
                 
 # Save the model to disk
-torch.save(model_bass.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_bass_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_songlen_{SONGLEN}.pth")
-torch.save(model_drum.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_drum_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_songlen_{SONGLEN}.pth")
-torch.save(model_voca.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_voca_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_songlen_{SONGLEN}.pth")
-torch.save(model_othr.state_dict(), f"/pscratch/sd/h/hsko/jupyter/output/waveunet/output_novqvae_evencrop/model_othr_vq-vae-spectro_lr_{LEARNING_RATE}_epoch_{NUM_EPOCH}_songlen_{SONGLEN}.pth")
+torch.save(model_bass.state_dict(), f"/path/to/save/bass/model.pth")
+torch.save(model_drum.state_dict(), f"/path/to/save/drum/model.pth")
+torch.save(model_voca.state_dict(), f"/path/to/save/voca/model.pth")
+torch.save(model_othr.state_dict(), f"/path/to/save/othr/model.pth")
 
