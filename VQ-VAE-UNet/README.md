@@ -8,11 +8,11 @@ VQ-VAE with UNet encoder/decoder.
 
 - Example run command:
 UNet + VQ-VAE: 
-'''
+```
 python VQ-VAE-UNet.py --enable_amp --len 2 --valen 2 --batch_size 4 --num_epoch 100000 --unet_only --datareamp 0.7 1.0 --l1l2 l1 --cylr 5e-6 1e-4
-'''
+```
 
-'''
+```
 UNet only: python VQ-VAE-UNet.py --enable_amp --len 2 --valen 2 --batch_size 4 --num_epoch 100000 --unet_only --datareamp 0.7 1.0 --l1l2 l1 --cylr 5e-6 1e-4 --unet_only
-'''
+```
 
