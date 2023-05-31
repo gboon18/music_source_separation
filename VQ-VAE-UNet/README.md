@@ -1,4 +1,4 @@
-VQ-VAE with UNet encoder/decoder.
+# VQ-VAE with UNet encoder/decoder.
 
 - UNet takes audio .wav file in time domain.
 - At the highest latent space of the UNet (encoded), [VQ-VAE](https://doi.org/10.48550/arXiv.1711.00937) is used for the embedding.
